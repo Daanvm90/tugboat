@@ -1,4 +1,6 @@
-# ![tugboat](logo_tugboat_no_text.png)
+<p align="center">
+  <img src="logo_tugboat_no_text.png" alt="tugboat" width="50%">
+</p>
 
 ## Tugboat: Multi-Format Artifact Gateway
 

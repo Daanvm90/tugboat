@@ -1,4 +1,4 @@
-# <div style="width: 100%; background-color: #EFEFEF; display: flex; justify-content: center;"><img src="tugboat_logo.svg" alt="tugboat" style="max-width: 50%; height: auto;" /></div>
+# <div style="width: 100%; background-color: #EFEFEF; text-align: center;"><img src="tugboat_logo.svg" alt="tugboat" style="max-width: 50%; height: auto;" /></div>
 
 ## Tugboat: Multi-Format Artifact Gateway
 

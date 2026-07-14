@@ -1,8 +1,4 @@
-<p align="center">
-  <img src="tugboat_logo.svg" alt="tugboat" width="50%">
-</p>
-
-##
+# ![tugboat](logo_tugboat_no_text.png)
 
 ## Tugboat: Multi-Format Artifact Gateway
 

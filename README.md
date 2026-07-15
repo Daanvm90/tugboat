@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="tugboat_harbor_logo.jpg" alt="tugboat" width="50%">
+  <img src="media/logo_with_lighthouse.jpg" alt="tugboat" width="50%">
 </p>
 
 ## Tugboat: Multi-Format Artifact Gateway

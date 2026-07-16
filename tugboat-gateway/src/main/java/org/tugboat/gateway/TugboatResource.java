@@ -1,0 +1,97 @@
+package org.tugboat.gateway;
+
+import io.smallrye.mutiny.Uni;
+import jakarta.inject.Inject;
+import jakarta.ws.rs.GET;
+import jakarta.ws.rs.Path;
+import jakarta.ws.rs.PathParam;
+import org.jboss.logging.Logger;
+import org.jboss.resteasy.reactive.RestResponse;
+import org.tugboat.gateway.service.HarborOrasService;
+
+import java.io.File;
+import java.io.InputStream;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
+import java.time.Duration;
+import java.util.Optional;
+
+@Path("/repository/maven")
+public class TugboatResource {
+
+    private static final Logger LOG = Logger.getLogger(TugboatResource.class);
+
+    private static final String MAVEN_CENTRAL_URL = "https://repo.maven.apache.org/maven2/";
+
+    @Inject
+    HarborOrasService harborService;
+
+    private final HttpClient httpClient = HttpClient.newBuilder()
+            .connectTimeout(Duration.ofSeconds(10))
+            .build();
+
+    @GET
+    @Path("/{groupId: .+}/{artifactId}/{version}/{filename}")
+    public Uni<RestResponse<?>> fetchArtifact(
+            @PathParam("groupId") String groupId,
+            @PathParam("artifactId") String artifactId,
+            @PathParam("version") String version,
+            @PathParam("filename") String filename) {
+
+        String originalPath = String.format("%s/%s/%s/%s", groupId, artifactId, version, filename);
+        LOG.infof("Maven request ontvangen voor: %s", originalPath);
+
+        String ociReference = String.format("%s:%s", groupId.replace("/", "."), version);
+
+        return Uni.createFrom().item(() -> {
+            try {
+                // Check if available in Harbor (cache hit)
+                 Optional<File> cachedFile = harborService.pullArtifactFromHarbor(ociReference, filename);
+                 if (cachedFile.isPresent()) {
+                     return RestResponse.ResponseBuilder
+                             .ok(cachedFile.get())
+                             .header("Content-Disposition", "attachment; filename=\"" + filename + "\"")
+                             .build();
+                 }
+
+                 // Cache miss
+                LOG.infof("Artifact niet gevonden in Harbor. Downloaden van Maven Central...");
+                URI sourceUri = URI.create(MAVEN_CENTRAL_URL + originalPath);
+
+                HttpRequest request = HttpRequest.newBuilder()
+                        .uri(sourceUri)
+                        .GET()
+                        .build();
+
+                HttpResponse<InputStream> response = httpClient.send(request, HttpResponse.BodyHandlers.ofInputStream());
+
+                if (response.statusCode() != 200) {
+                    LOG.warnf("Artifact niet gevonden op Maven Central (HTTP %d)", response.statusCode());
+                    return RestResponse.status(RestResponse.Status.NOT_FOUND);
+                }
+
+                // Temporarily save
+                java.nio.file.Path tempFile = Files.createTempFile("tugboat-", "-" + filename);
+                Files.copy(response.body(), tempFile, StandardCopyOption.REPLACE_EXISTING);
+
+                // Distribute to Harbor as OCI-artifact
+                String digest = harborService.pushArtifactToHarbor(ociReference, tempFile, filename);
+                LOG.infof("Succesvol vertaald en opgeslagen in Harbor met digest: %s", digest);
+
+                return RestResponse.ResponseBuilder
+                        .ok(tempFile.toFile())
+                        .header("Content-Disposition", "attachment; filename=\"" + filename + "\"")
+                        .header("X-Tugboat-Oci-Digest", digest) // Leuke bonus: stuur de OCI digest mee in de headers
+                        .build();
+
+            } catch (Exception e) {
+                LOG.error("Fout tijdens ophalen en proxien van artifact", e);
+                return RestResponse.status(RestResponse.Status.INTERNAL_SERVER_ERROR);
+            }
+        });
+    }
+}

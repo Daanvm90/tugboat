@@ -2,13 +2,15 @@ package org.tugboat.gateway.service;
 
 import jakarta.enterprise.context.ApplicationScoped;
 import land.oras.*;
+import land.oras.utils.Const;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.jboss.logging.Logger;
 import org.tugboat.ArtifactStatus;
 
 import java.io.File;
+import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Stream;
@@ -20,10 +22,12 @@ public class HarborOrasService {
         public File file;
         public ArtifactStatus status;
         public Manifest manifest;
-        public ArtifactEntry(File file, ArtifactStatus status, Manifest manifest) {
+        public Path tempDir;
+        public ArtifactEntry(File file, ArtifactStatus status, Manifest manifest, Path tempDir) {
             this.file = file;
             this.status = status;
             this.manifest = manifest;
+            this.tempDir = tempDir;
         }
     }
 
@@ -103,23 +107,29 @@ public class HarborOrasService {
         }
     }
 
-    public String pushArtifactNewLayerToHarbor(String ociReference, Path tempFile, String artifactId, String filename, ArtifactEntry cachedFile) {
+    public String pushArtifactNewLayerToHarbor(String ociReference, Path tempFile, String artifactId, String filename, ArtifactEntry cachedFile) throws IOException {
         ContainerRef ref = ContainerRef.parse(ociReference);
 
         Registry registry = Registry.builder()
                 .insecure(harborUrl, harborUsername, harborPassword)
                 .build();
 
-        String fileExtension = filename.substring(filename.lastIndexOf(".") + 1);
-//
-//        Annotations annotations = Annotations.ofManifest(Map.of("build-tool", "maven"))
-//                .withFileAnnotations(artifactId, Map.of("format", fileExtension));
+        try (Stream<Path> layerStream = Files.list(cachedFile.tempDir)) {
+            List<Layer> layers = layerStream.map(file -> registry.pushBlob(ref, file, Map.of(Const.ANNOTATION_TITLE, file.toFile().getName()))).toList();
 
-        Layer layer = Layer.fromFile(tempFile).withMediaType(determineMediaType(fileExtension)).withAnnotations(Map.of("format", fileExtension));
-        List<Layer> layers = new ArrayList<>(cachedFile.manifest.getLayers());
-        layers.add(layer);
-        registry.pushManifest(ref, cachedFile.manifest.withLayers(layers));
-        return registry.pushBlob(ref, tempFile).getDigest();
+            Config config = registry.pushConfig(ref, Config.empty().withMediaType("application/vnd.maven.artifact"));
+
+            Manifest manifest = Manifest.empty()
+                    .withConfig(config)
+                    .withLayers(layers);
+            registry.pushManifest(ref, manifest);
+
+            return manifest.getDigest();
+
+        } catch (Exception e) {
+            LOG.errorf("Fout tijdens toevoegen van nieuwe layer '%s': %s", filename, e.getMessage());
+            throw new RuntimeException("Kan OCI layer niet updaten", e);
+        }
     }
 
     /**
@@ -129,21 +139,20 @@ public class HarborOrasService {
      * @param filename     The expected filename (e.g., "jna-5.8.0-jpms.jar")
      * @return The downloaded File, or null if it does not exist in Harbor (Cache Miss)
      */
-    public ArtifactEntry pullArtifactFromHarbor(String ociReference, String filename) {
+    public ArtifactEntry pullArtifactFromHarbor(String ociReference, String filename) throws IOException {
 
-        // 1. Build the full reference
+        // 1. Create a temporary directory to extract the pulled OCI layers into
+        java.nio.file.Path tempDir = java.nio.file.Files.createTempDirectory("tugboat-");
+
+        // 2. Build the full reference
         ContainerRef ref = ContainerRef.parse(ociReference);
 
-        // 2. Configure the Registry client
+        // 3. Configure the Registry client
         Registry registry = Registry.builder()
                 .insecure(harborUrl, harborUsername, harborPassword)
                 .build();
-
         try {
             LOG.infof("Checking Harbor for artifact: %s", ociReference);
-
-            // 3. Create a temporary directory to extract the pulled OCI layers into
-            java.nio.file.Path tempDir = java.nio.file.Files.createTempDirectory("tugboat-pull-");
 
             // 4. Pull the artifact from Harbor using the ORAS SDK
             registry.pullArtifact(ref, tempDir, OCI.PullOptions.defaults());
@@ -153,10 +162,10 @@ public class HarborOrasService {
                 java.util.Optional<java.nio.file.Path> pulledFile = stream.filter(file -> file.toFile().getName().equalsIgnoreCase(filename)).findFirst();
                 if (pulledFile.isPresent()) {
                     LOG.infof("Cache Hit! Successfully pulled %s from Harbor.", pulledFile.get().getFileName());
-                    return new ArtifactEntry(pulledFile.get().toFile(), ArtifactStatus.OK, registry.getManifest(ref));
+                    return new ArtifactEntry(pulledFile.get().toFile(), ArtifactStatus.OK, registry.getManifest(ref), tempDir);
                 } else {
                     LOG.warnf("Artifact pulled, but expected file '%s' was missing inside the OCI manifest.", filename);
-                    return new ArtifactEntry(null, ArtifactStatus.LAYER_MISSING, registry.getManifest(ref));
+                    return new ArtifactEntry(null, ArtifactStatus.LAYER_MISSING, registry.getManifest(ref), tempDir);
                 }
             }
         } catch (Exception e) {
@@ -165,6 +174,6 @@ public class HarborOrasService {
             LOG.debugf("Cache Miss: Artifact %s not found in Harbor (or pull failed: %s)", ociReference, e.getMessage());
         }
         LOG.warnf("Artifact pulled, but expected file '%s' was missing inside the OCI manifest.", filename);
-        return new ArtifactEntry(null, ArtifactStatus.MISSING, null);
+        return new ArtifactEntry(null, ArtifactStatus.MISSING, null, tempDir);
     }
 }

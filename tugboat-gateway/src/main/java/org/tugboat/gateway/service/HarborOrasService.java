@@ -4,14 +4,28 @@ import jakarta.enterprise.context.ApplicationScoped;
 import land.oras.*;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.jboss.logging.Logger;
+import org.tugboat.ArtifactStatus;
 
 import java.io.File;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
-import java.util.Optional;
+import java.util.stream.Stream;
 
 @ApplicationScoped
 public class HarborOrasService {
+    public static class ArtifactEntry {
+
+        public File file;
+        public ArtifactStatus status;
+        public Manifest manifest;
+        public ArtifactEntry(File file, ArtifactStatus status, Manifest manifest) {
+            this.file = file;
+            this.status = status;
+            this.manifest = manifest;
+        }
+    }
 
     private static final Logger LOG = Logger.getLogger(HarborOrasService.class);
 
@@ -27,6 +41,23 @@ public class HarborOrasService {
     @ConfigProperty(name = "tugboat.harbor.password")
     String harborPassword;
 
+    private String determineMediaType(String fileExtension) {
+        switch (fileExtension) {
+            case "pom":
+                return "application/vnd.maven.pom+xml";
+            case "jar":
+                return "application/java-archive";
+            case "sha1":
+                return "application/vnd.maven.sha1";
+            case "md5":
+                return "application/vnd.maven.md5";
+            case "xml":
+                return "application/xml";
+            default:
+                return "application/octet-stream";
+        }
+    }
+
     /**
      * Responsible for transmitting the Maven dependency (like jna-5.8.0-jpms.jar)
      * as an OCI artifact to Harbor.
@@ -36,7 +67,7 @@ public class HarborOrasService {
      * @param filename The original filename (e.g., "jna-5.8.0-jpms.jar")
      * @return The resulting OCI Manifest digest
      */
-    public String pushArtifactToHarbor(String ociReference, Path artifactPath, String filename) {
+    public String pushArtifactToHarbor(String ociReference, Path artifactPath, String artifactId, String filename) {
 
         // 1. Constructing the full OCI reference
         // Example: "harbor.yourdomain.com/maven-proxy/net.java.dev.jna:5.8.0"
@@ -47,13 +78,15 @@ public class HarborOrasService {
                 .insecure(harborUrl, harborUsername, harborPassword)
                 .build();
 
+        String fileExtension = filename.substring(filename.lastIndexOf(".") + 1);
+
         // 3. Constructing annotations (metadata) associated with the artifact
         Annotations annotations = Annotations.ofManifest(Map.of("build-tool", "maven"))
-                .withFileAnnotations(filename, Map.of("format", "jar"));
+                .withFileAnnotations(artifactId, Map.of("format", fileExtension));
 
         // 4. Define the type artifact and the local path to the artifact
         ArtifactType artifactType = ArtifactType.from("application/vnd.maven.artifact");
-        LocalPath localPath = LocalPath.of(artifactPath, "application/java-archive");
+        LocalPath localPath = LocalPath.of(artifactPath, determineMediaType(fileExtension));
 
         try {
             LOG.infof("Start push van %s naar OCI registry...", ociReference);
@@ -70,6 +103,25 @@ public class HarborOrasService {
         }
     }
 
+    public String pushArtifactNewLayerToHarbor(String ociReference, Path tempFile, String artifactId, String filename, ArtifactEntry cachedFile) {
+        ContainerRef ref = ContainerRef.parse(ociReference);
+
+        Registry registry = Registry.builder()
+                .insecure(harborUrl, harborUsername, harborPassword)
+                .build();
+
+        String fileExtension = filename.substring(filename.lastIndexOf(".") + 1);
+//
+//        Annotations annotations = Annotations.ofManifest(Map.of("build-tool", "maven"))
+//                .withFileAnnotations(artifactId, Map.of("format", fileExtension));
+
+        Layer layer = Layer.fromFile(tempFile).withMediaType(determineMediaType(fileExtension)).withAnnotations(Map.of("format", fileExtension));
+        List<Layer> layers = new ArrayList<>(cachedFile.manifest.getLayers());
+        layers.add(layer);
+        registry.pushManifest(ref, cachedFile.manifest.withLayers(layers));
+        return registry.pushBlob(ref, tempFile).getDigest();
+    }
+
     /**
      * Checks if an artifact already exists in Harbor and pulls it locally if it does.
      *
@@ -77,7 +129,7 @@ public class HarborOrasService {
      * @param filename     The expected filename (e.g., "jna-5.8.0-jpms.jar")
      * @return The downloaded File, or null if it does not exist in Harbor (Cache Miss)
      */
-    public Optional<File> pullArtifactFromHarbor(String ociReference, String filename) {
+    public ArtifactEntry pullArtifactFromHarbor(String ociReference, String filename) {
 
         // 1. Build the full reference
         ContainerRef ref = ContainerRef.parse(ociReference);
@@ -98,10 +150,13 @@ public class HarborOrasService {
 
             // 5. Verify if the file we expect is actually part of the pulled artifact
             try (java.util.stream.Stream<java.nio.file.Path> stream = java.nio.file.Files.list(tempDir)) {
-                java.util.Optional<java.nio.file.Path> pulledFile = stream.filter(java.nio.file.Files::isRegularFile).findFirst();
+                java.util.Optional<java.nio.file.Path> pulledFile = stream.filter(file -> file.toFile().getName().equalsIgnoreCase(filename)).findFirst();
                 if (pulledFile.isPresent()) {
                     LOG.infof("Cache Hit! Successfully pulled %s from Harbor.", pulledFile.get().getFileName());
-                    return Optional.of(pulledFile.get().toFile());
+                    return new ArtifactEntry(pulledFile.get().toFile(), ArtifactStatus.OK, registry.getManifest(ref));
+                } else {
+                    LOG.warnf("Artifact pulled, but expected file '%s' was missing inside the OCI manifest.", filename);
+                    return new ArtifactEntry(null, ArtifactStatus.LAYER_MISSING, registry.getManifest(ref));
                 }
             }
         } catch (Exception e) {
@@ -110,6 +165,6 @@ public class HarborOrasService {
             LOG.debugf("Cache Miss: Artifact %s not found in Harbor (or pull failed: %s)", ociReference, e.getMessage());
         }
         LOG.warnf("Artifact pulled, but expected file '%s' was missing inside the OCI manifest.", filename);
-        return Optional.empty();
+        return new ArtifactEntry(null, ArtifactStatus.MISSING, null);
     }
 }

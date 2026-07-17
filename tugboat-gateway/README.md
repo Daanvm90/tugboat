@@ -14,7 +14,7 @@ You can run your application in dev mode that enables live coding using:
 
 > **_NOTE:_**  Quarkus now ships with a Dev UI, which is available in dev mode only at <http://localhost:8080/q/dev/>.
 
-> An example request to the API can be: `http://localhost:8080/repository/maven/net/java/dev/jna/jna/5.8.0/jna-5.8.0-jpms.jar`.
+> An example request to the API can be: `http://localhost:8080/repository/maven/net/java/dev/jna/jna/5.8.0/jna-5.8.0.jar`.
 
 ## Packaging and running the application
 

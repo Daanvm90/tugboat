@@ -40,13 +40,11 @@ public class HarborOrasService {
 
         // 1. Constructing the full OCI reference
         // Example: "harbor.yourdomain.com/maven-proxy/net.java.dev.jna:5.8.0"
-        String domain = harborUrl.replace("https://", "").replace("http://", "");
-        String fullReference = String.format("%s/%s/%s", domain, harborProject, ociReference);
-        ContainerRef ref = ContainerRef.parse(fullReference);
+        ContainerRef ref = ContainerRef.parse(ociReference);
 
         // 2. Configure the Registry client with the client credentials
         Registry registry = Registry.builder()
-                .insecure(domain, harborUsername, harborPassword)
+                .insecure(harborUrl, harborUsername, harborPassword)
                 .build();
 
         // 3. Constructing annotations (metadata) associated with the artifact
@@ -58,7 +56,7 @@ public class HarborOrasService {
         LocalPath localPath = LocalPath.of(artifactPath, "application/java-archive");
 
         try {
-            LOG.infof("Start push van %s naar OCI registry...", fullReference);
+            LOG.infof("Start push van %s naar OCI registry...", ociReference);
 
             // 5. Push the artifact through ORAS on Harbor
             Manifest manifest = registry.pushArtifact(ref, artifactType, annotations, localPath);
@@ -82,17 +80,15 @@ public class HarborOrasService {
     public Optional<File> pullArtifactFromHarbor(String ociReference, String filename) {
 
         // 1. Build the full reference
-        String domain = harborUrl.replace("https://", "").replace("http://", "");
-        String fullReference = String.format("%s/%s/%s", domain, harborProject, ociReference);
-        ContainerRef ref = ContainerRef.parse(fullReference);
+        ContainerRef ref = ContainerRef.parse(ociReference);
 
         // 2. Configure the Registry client
         Registry registry = Registry.builder()
-                .insecure(domain, harborUsername, harborPassword)
+                .insecure(harborUrl, harborUsername, harborPassword)
                 .build();
 
         try {
-            LOG.infof("Checking Harbor for artifact: %s", fullReference);
+            LOG.infof("Checking Harbor for artifact: %s", ociReference);
 
             // 3. Create a temporary directory to extract the pulled OCI layers into
             java.nio.file.Path tempDir = java.nio.file.Files.createTempDirectory("tugboat-pull-");
@@ -111,7 +107,7 @@ public class HarborOrasService {
         } catch (Exception e) {
             // A cache miss (artifact not found in Harbor) will throw an exception here.
             // We log it as DEBUG because a cache miss is a normal operational event, not an application error.
-            LOG.debugf("Cache Miss: Artifact %s not found in Harbor (or pull failed: %s)", fullReference, e.getMessage());
+            LOG.debugf("Cache Miss: Artifact %s not found in Harbor (or pull failed: %s)", ociReference, e.getMessage());
         }
         LOG.warnf("Artifact pulled, but expected file '%s' was missing inside the OCI manifest.", filename);
         return Optional.empty();

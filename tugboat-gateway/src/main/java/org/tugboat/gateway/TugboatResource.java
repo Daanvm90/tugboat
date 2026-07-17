@@ -5,6 +5,7 @@ import jakarta.inject.Inject;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
+import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.jboss.logging.Logger;
 import org.jboss.resteasy.reactive.RestResponse;
 import org.tugboat.gateway.service.HarborOrasService;
@@ -27,6 +28,12 @@ public class TugboatResource {
 
     private static final String MAVEN_CENTRAL_URL = "https://repo.maven.apache.org/maven2/";
 
+    @ConfigProperty(name = "tugboat.harbor.url")
+    String harborUrl;
+
+    @ConfigProperty(name = "tugboat.harbor.project")
+    String harborProject;
+
     @Inject
     HarborOrasService harborService;
 
@@ -45,7 +52,8 @@ public class TugboatResource {
         String originalPath = String.format("%s/%s/%s/%s", groupId, artifactId, version, filename);
         LOG.infof("Maven request ontvangen voor: %s", originalPath);
 
-        String ociReference = String.format("%s:%s", groupId.replace("/", "."), version);
+        String ociReference = String.format("%s/%s/%s/%s:%s", harborUrl, harborProject, groupId.replace("/", "."), artifactId, version);
+        // harbor.local/maven-proxy/net.java.dev.jna/jna:5.8.0
 
         return Uni.createFrom().item(() -> {
             try {

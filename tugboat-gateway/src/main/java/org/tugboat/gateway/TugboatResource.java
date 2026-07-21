@@ -59,22 +59,26 @@ public class TugboatResource {
 
         return Uni.createFrom().item(() -> {
             try {
-                // Check if available in Harbor (cache hit)
-                HarborOrasService.ArtifactEntry cachedFile = harborService.pullArtifactFromHarbor(ociReference, filename);
+                // 1. Fast metadata check via OCI Manifest
+                HarborOrasService.ArtifactEntry cachedFile = harborService.checkArtifactInHarbor(ociReference, filename);
+
+                // 2. Cache Hit: Stream directly from Harbor to the Client
                 if (ArtifactStatus.OK.equals(cachedFile.status)) {
+                    LOG.infof("Streaming artifact %s directly from Harbor...", filename);
+                    InputStream harborStream = harborService.streamBlobFromHarbor(ociReference, cachedFile.blobDigest);
+
                     return RestResponse.ResponseBuilder
-                            .ok(cachedFile.file)
+                            .ok(harborStream)
                             .header("Content-Disposition", "attachment; filename=\"" + filename + "\"")
+                            .header("X-Tugboat-Cache", "HIT")
                             .build();
                 }
 
-                // Cache miss
+                // 3. Cache Miss: Stream directly from Maven Central to the Client
                 LOG.infof("Artifact niet gevonden in Harbor. Streamen van Maven Central...");
 
                 URI sourceUri = URI.create(MAVEN_CENTRAL_URL + originalPath);
                 HttpRequest request = HttpRequest.newBuilder().uri(sourceUri).GET().build();
-
-                // Fetch the InputStream directly
                 HttpResponse<InputStream> response = httpClient.send(request, HttpResponse.BodyHandlers.ofInputStream());
 
                 if (response.statusCode() != 200) {
@@ -82,16 +86,17 @@ public class TugboatResource {
                     return RestResponse.status(RestResponse.Status.NOT_FOUND);
                 }
 
-                // Fire and forget the NATS Event
+                // 4. Emit event for the publisher module to handle the OCI Push asynchronously
                 boolean isMissingLayer = ArtifactStatus.LAYER_MISSING.equals(cachedFile.status);
                 ArtifactDownloadedEvent event = new ArtifactDownloadedEvent(groupId, artifactId, version, filename, ociReference, isMissingLayer);
                 downloadEmitter.send(event);
                 LOG.infof("Download event gedistribueerd naar NATS voor bestand: %s", filename);
 
-                // Return InputStream directly for streaming chunks to the client
+                // 5. Return InputStream directly for streaming chunks to the client
                 return RestResponse.ResponseBuilder
                         .ok(response.body())
                         .header("Content-Disposition", "attachment; filename=\"" + filename + "\"")
+                        .header("X-Tugboat-Cache", "MISS")
                         .build();
 
             } catch (Exception e) {

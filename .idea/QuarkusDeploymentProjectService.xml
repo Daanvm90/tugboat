@@ -11,6 +11,14 @@
             </ModuleState>
           </value>
         </entry>
+        <entry key="tugboat-oci-publisher">
+          <value>
+            <ModuleState>
+              <option name="hash" value="-1852430247" />
+              <option name="version" value="1" />
+            </ModuleState>
+          </value>
+        </entry>
       </map>
     </option>
   </component>

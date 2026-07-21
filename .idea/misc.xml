@@ -3,6 +3,7 @@
   <component name="ExternalStorageConfigurationManager" enabled="true" />
   <component name="FrameworkDetectionExcludesConfiguration">
     <file type="Quarkus" url="file://$PROJECT_DIR$/tugboat-gateway" />
+    <file type="Quarkus" url="file://$PROJECT_DIR$/tugboat-oci-publisher" />
   </component>
   <component name="MavenProjectsManager">
     <option name="originalFiles">

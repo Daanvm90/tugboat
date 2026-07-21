@@ -3,11 +3,15 @@
   <component name="ExternalStorageConfigurationManager" enabled="true" />
   <component name="FrameworkDetectionExcludesConfiguration">
     <file type="Quarkus" url="file://$PROJECT_DIR$/tugboat-gateway" />
+    <file type="Quarkus" url="file://$PROJECT_DIR$/tugboat-oci-publisher" />
   </component>
   <component name="MavenProjectsManager">
     <option name="originalFiles">
       <list>
         <option value="$PROJECT_DIR$/tugboat-gateway/pom.xml" />
+        <option value="$PROJECT_DIR$/tugboat-data-model/pom.xml" />
+        <option value="$PROJECT_DIR$/tugboat-oci-publisher/pom.xml" />
+        <option value="$PROJECT_DIR$/tugboat-common/pom.xml" />
       </list>
     </option>
   </component>

@@ -3,7 +3,6 @@
   <component name="ProjectModuleManager">
     <modules>
       <module fileurl="file://$PROJECT_DIR$/.idea/tugboat.iml" filepath="$PROJECT_DIR$/.idea/tugboat.iml" />
-      <module fileurl="file://$PROJECT_DIR$/tugboat-gateway/tugboat-gateway.iml" filepath="$PROJECT_DIR$/tugboat-gateway/tugboat-gateway.iml" />
     </modules>
   </component>
 </project>

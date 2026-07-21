@@ -1,4 +1,4 @@
-package org.tugboat.exceptions;
+package exceptions;
 
 public class ResourceNotFoundException extends Exception {
     public ResourceNotFoundException(String message) {

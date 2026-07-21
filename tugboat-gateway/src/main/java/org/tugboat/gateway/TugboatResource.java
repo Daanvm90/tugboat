@@ -6,27 +6,25 @@ import jakarta.ws.rs.GET;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
+import org.eclipse.microprofile.reactive.messaging.Channel;
+import org.eclipse.microprofile.reactive.messaging.Emitter;
 import org.jboss.logging.Logger;
 import org.jboss.resteasy.reactive.RestResponse;
 import org.tugboat.ArtifactStatus;
-import org.tugboat.exceptions.ResourceNotFoundException;
+import org.tugboat.events.ArtifactDownloadedEvent;
 import org.tugboat.gateway.service.HarborOrasService;
 
-import java.io.IOException;
 import java.io.InputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
-import java.nio.file.Files;
-import java.nio.file.StandardCopyOption;
 import java.time.Duration;
 
 @Path("/repository/maven")
 public class TugboatResource {
 
     private static final Logger LOG = Logger.getLogger(TugboatResource.class);
-
     private static final String MAVEN_CENTRAL_URL = "https://repo.maven.apache.org/maven2/";
 
     @ConfigProperty(name = "tugboat.harbor.url")
@@ -37,6 +35,10 @@ public class TugboatResource {
 
     @Inject
     HarborOrasService harborService;
+
+    @Inject
+    @Channel("artifact-downloads")
+    Emitter<ArtifactDownloadedEvent> downloadEmitter;
 
     private final HttpClient httpClient = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(10))
@@ -54,45 +56,42 @@ public class TugboatResource {
         LOG.infof("Maven request ontvangen voor: %s", originalPath);
 
         String ociReference = String.format("%s/%s/%s/%s:%s", harborUrl, harborProject, groupId.replace("/", "."), artifactId, version).toLowerCase();
-        // harbor.local/maven-proxy/net.java.dev.jna/jna:5.8.0
 
         return Uni.createFrom().item(() -> {
             try {
-                java.nio.file.Path tempFile;
-
-
                 // Check if available in Harbor (cache hit)
-                 HarborOrasService.ArtifactEntry cachedFile = harborService.pullArtifactFromHarbor(ociReference, filename);
-                 if (ArtifactStatus.OK.equals(cachedFile.status)) {
-                     return RestResponse.ResponseBuilder
-                             .ok(cachedFile.file)
-                             .header("Content-Disposition", "attachment; filename=\"" + filename + "\"")
-                             .build();
-                 }
-
-                 // Cache miss
-                LOG.infof("Artifact niet gevonden in Harbor. Downloaden van Maven Central...");
-                 try {
-                     tempFile = getArtifactFromMavenCentral(originalPath, filename, cachedFile.tempDir);
-                 } catch (ResourceNotFoundException rnfe) {
-                     return RestResponse.status(RestResponse.Status.NOT_FOUND);
-                 }
-
-
-                 String digest;
-                // Distribute to Harbor as OCI-artifact
-                if (ArtifactStatus.LAYER_MISSING.equals(cachedFile.status)) {
-                    digest  = harborService.pushArtifactNewLayerToHarbor(ociReference, tempFile, artifactId, filename, cachedFile);
-                } else {
-                    digest = harborService.pushArtifactToHarbor(ociReference, tempFile, artifactId, filename);
+                HarborOrasService.ArtifactEntry cachedFile = harborService.pullArtifactFromHarbor(ociReference, filename);
+                if (ArtifactStatus.OK.equals(cachedFile.status)) {
+                    return RestResponse.ResponseBuilder
+                            .ok(cachedFile.file)
+                            .header("Content-Disposition", "attachment; filename=\"" + filename + "\"")
+                            .build();
                 }
 
-                LOG.infof("Succesvol vertaald en opgeslagen in Harbor met digest: %s", digest);
+                // Cache miss
+                LOG.infof("Artifact niet gevonden in Harbor. Streamen van Maven Central...");
 
+                URI sourceUri = URI.create(MAVEN_CENTRAL_URL + originalPath);
+                HttpRequest request = HttpRequest.newBuilder().uri(sourceUri).GET().build();
+
+                // Fetch the InputStream directly
+                HttpResponse<InputStream> response = httpClient.send(request, HttpResponse.BodyHandlers.ofInputStream());
+
+                if (response.statusCode() != 200) {
+                    LOG.warnf("Artifact niet gevonden op Maven Central (HTTP %d)", response.statusCode());
+                    return RestResponse.status(RestResponse.Status.NOT_FOUND);
+                }
+
+                // Fire and forget the NATS Event
+                boolean isMissingLayer = ArtifactStatus.LAYER_MISSING.equals(cachedFile.status);
+                ArtifactDownloadedEvent event = new ArtifactDownloadedEvent(groupId, artifactId, version, filename, ociReference, isMissingLayer);
+                downloadEmitter.send(event);
+                LOG.infof("Download event gedistribueerd naar NATS voor bestand: %s", filename);
+
+                // Return InputStream directly for streaming chunks to the client
                 return RestResponse.ResponseBuilder
-                        .ok(tempFile.toFile())
+                        .ok(response.body())
                         .header("Content-Disposition", "attachment; filename=\"" + filename + "\"")
-                        .header("X-Tugboat-Oci-Digest", digest) // Leuke bonus: stuur de OCI digest mee in de headers
                         .build();
 
             } catch (Exception e) {
@@ -100,24 +99,5 @@ public class TugboatResource {
                 return RestResponse.status(RestResponse.Status.INTERNAL_SERVER_ERROR);
             }
         });
-    }
-
-    private java.nio.file.Path getArtifactFromMavenCentral(String originalPath, String filename, java.nio.file.Path tempDir) throws ResourceNotFoundException, IOException, InterruptedException {
-        URI sourceUri = URI.create(MAVEN_CENTRAL_URL + originalPath);
-
-        HttpRequest request = HttpRequest.newBuilder()
-                .uri(sourceUri)
-                .GET()
-                .build();
-
-        HttpResponse<InputStream> response = httpClient.send(request, HttpResponse.BodyHandlers.ofInputStream());
-        if (response.statusCode() != 200) {
-            LOG.warnf("Artifact niet gevonden op Maven Central (HTTP %d)", response.statusCode());
-            throw new ResourceNotFoundException("Artifact niet gevonden op Maven Central");
-        }
-
-        java.nio.file.Path tempFile = Files.createFile(tempDir.resolve(filename));
-        Files.copy(response.body(), tempFile, StandardCopyOption.REPLACE_EXISTING);
-        return tempFile;
     }
 }

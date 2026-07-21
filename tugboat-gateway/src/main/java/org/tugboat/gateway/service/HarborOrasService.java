@@ -1,5 +1,6 @@
 package org.tugboat.gateway.service;
 
+import io.micrometer.common.util.StringUtils;
 import jakarta.enterprise.context.ApplicationScoped;
 import land.oras.*;
 import land.oras.utils.Const;
@@ -133,47 +134,60 @@ public class HarborOrasService {
     }
 
     /**
-     * Checks if an artifact already exists in Harbor and pulls it locally if it does.
+     * Checks if an artifact already exists in Harbor by querying the OCI Manifest.
+     * If the required layer exists, it selectively pulls only that blob.
      *
      * @param ociReference The OCI tag (e.g., "net.java.dev.jna:5.8.0")
      * @param filename     The expected filename (e.g., "jna-5.8.0-jpms.jar")
-     * @return The downloaded File, or null if it does not exist in Harbor (Cache Miss)
+     * @return The downloaded File, or the appropriate ArtifactStatus on Cache Miss
      */
     public ArtifactEntry pullArtifactFromHarbor(String ociReference, String filename) throws IOException {
 
-        // 1. Create a temporary directory to extract the pulled OCI layers into
-        java.nio.file.Path tempDir = java.nio.file.Files.createTempDirectory("tugboat-");
-
-        // 2. Build the full reference
         ContainerRef ref = ContainerRef.parse(ociReference);
-
-        // 3. Configure the Registry client
         Registry registry = Registry.builder()
                 .insecure(harborUrl, harborUsername, harborPassword)
                 .build();
+
+        Manifest manifest;
         try {
-            LOG.infof("Checking Harbor for artifact: %s", ociReference);
-
-            // 4. Pull the artifact from Harbor using the ORAS SDK
-            registry.pullArtifact(ref, tempDir, OCI.PullOptions.defaults());
-
-            // 5. Verify if the file we expect is actually part of the pulled artifact
-            try (java.util.stream.Stream<java.nio.file.Path> stream = java.nio.file.Files.list(tempDir)) {
-                java.util.Optional<java.nio.file.Path> pulledFile = stream.filter(file -> file.toFile().getName().equalsIgnoreCase(filename)).findFirst();
-                if (pulledFile.isPresent()) {
-                    LOG.infof("Cache Hit! Successfully pulled %s from Harbor.", pulledFile.get().getFileName());
-                    return new ArtifactEntry(pulledFile.get().toFile(), ArtifactStatus.OK, registry.getManifest(ref), tempDir);
-                } else {
-                    LOG.warnf("Artifact pulled, but expected file '%s' was missing inside the OCI manifest.", filename);
-                    return new ArtifactEntry(null, ArtifactStatus.LAYER_MISSING, registry.getManifest(ref), tempDir);
-                }
-            }
+            LOG.infof("Checking Harbor manifest for artifact: %s", ociReference);
+            // 1. Fetch ONLY the manifest (lightweight JSON), not the layers
+            manifest = registry.getManifest(ref);
         } catch (Exception e) {
-            // A cache miss (artifact not found in Harbor) will throw an exception here.
-            // We log it as DEBUG because a cache miss is a normal operational event, not an application error.
-            LOG.debugf("Cache Miss: Artifact %s not found in Harbor (or pull failed: %s)", ociReference, e.getMessage());
+            // Artifact does not exist at all in Harbor
+            LOG.debugf("Cache Miss: Artifact %s not found in Harbor", ociReference);
+            return new ArtifactEntry(null, ArtifactStatus.MISSING, null, null);
         }
-        LOG.warnf("Artifact pulled, but expected file '%s' was missing inside the OCI manifest.", filename);
-        return new ArtifactEntry(null, ArtifactStatus.MISSING, null, tempDir);
+
+        // 2. Inspect the manifest layers to see if one matches our target filename
+        java.util.Optional<Layer> matchingLayer = manifest.getLayers().stream()
+                .filter(layer -> {
+                    // We set this annotation during the push phase
+                    String title = layer.getAnnotations().get(Const.ANNOTATION_TITLE);
+                    return filename.equalsIgnoreCase(title);
+                })
+                .findFirst();
+
+        if (matchingLayer.isEmpty() || StringUtils.isBlank(matchingLayer.get().getDigest())) {
+            LOG.infof("Cache Miss (Layer): Artifact exists, but expected file '%s' is missing.", filename);
+            // We pass the tempDir as null since we haven't created one yet
+            return new ArtifactEntry(null, ArtifactStatus.LAYER_MISSING, manifest, null);
+        }
+
+        LOG.infof("Cache Hit! Layer '%s' found in manifest. Downloading specific blob...", filename);
+
+        // 3. Create temp directory ONLY because we know we need to download something
+        Path tempDir = Files.createTempDirectory("tugboat-");
+        Path downloadedFile = tempDir.resolve(filename);
+
+        try {
+            // 4. Download ONLY the specific blob we need using its digest
+            registry.fetchBlob(ref.withDigest(matchingLayer.get().getDigest()), downloadedFile);
+
+            return new ArtifactEntry(downloadedFile.toFile(), ArtifactStatus.OK, manifest, tempDir);
+        } catch (Exception e) {
+            LOG.errorf("Fout tijdens downloaden van blob %s: %s", matchingLayer.get().getDigest(), e.getMessage());
+            throw new IOException("Failed to pull targeted blob from Harbor", e);
+        }
     }
 }
